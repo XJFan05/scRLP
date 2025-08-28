@@ -9,9 +9,9 @@ The scripts are shared for reproducibility and reference, and are not designed a
 ---
 
 ## 📂 Repository Structure
-- `R/` – R scripts for statistical analysis and figure generation  
-- `python/` – Python scripts for data processing and plotting  
-- `shell/` – Shell scripts for running pipelines  
+- `RLP-NES/` – Scripts for figure generation of RLP-NES  
+- `RLP-ERM/` – Scripts for figure generation of RLP-ERM  
+- `scRLP/` – Scripts for figure generation of scRLP  
 
 ---
 
