@@ -1,0 +1,135 @@
+---
+title: "UMAP_analysis_editing"
+output: html_document
+date: "2025-07-21"
+---
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)  # For combining plots
+```
+
+```{r}
+# Read editing matrices - change this path to your editing data file
+edit_data <- read.table("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH618_iCell8/JACUSA/TadA_ERM_3PABP_editReads_matrix_713highQual_final.tsv", header = TRUE, sep = "\t", row.names = 1)
+
+# For editing matrix, find sample columns
+edit_sample_start_col <- which(colnames(edit_data) == "total_edits") + 1
+edit_samples <- colnames(edit_data)[edit_sample_start_col:ncol(edit_data)]
+
+# Find common samples in editing data
+cat("Total samples in editing matrix:", length(edit_samples), "\n")
+
+# Extract the editing matrix (samples only)
+edit_matrix <- edit_data[, edit_sample_start_col:ncol(edit_data)]
+
+# Convert to matrix format and ensure it's numeric
+edit_matrix <- as.matrix(edit_matrix)
+edit_matrix[is.na(edit_matrix)] <- 0  # Replace NAs with 0
+
+cat("Total samples in editing matrix:", ncol(edit_matrix), "\n")
+cat("Total editing sites:", nrow(edit_matrix), "\n")
+
+```
+
+```{r}
+# Load existing seurat object if available, or create new one
+seurat_obj <- readRDS("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH618_iCell8/JACUSA/editing_data_seurat_object.rds")
+
+# Create Seurat object with filtering for editing data
+seurat_obj <- CreateSeuratObject(counts = edit_matrix, 
+                                project = "RNA_editing_analysis", 
+                                min.cells = 3,      # Editing site must be detected in at least 3 cells
+                                min.features = 0)   # No minimum features for cells
+
+# Normalize the editing data
+# Note: For editing data, you might want to use different normalization
+# LogNormalize with scale factor appropriate for editing counts
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+# Visualize QC metrics for editing data
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2) +
+  labs(title = "QC Metrics for Editing Data")
+
+# Find variable editing sites
+seurat_obj <- FindVariableFeatures(seurat_obj, 
+                                  selection.method = "vst", 
+                                  nfeatures = 2000)
+
+# Visualize variable editing sites
+top10 <- head(VariableFeatures(seurat_obj), 10)
+plot1 <- VariableFeaturePlot(seurat_obj)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE) +
+  labs(title = "Variable Editing Sites")
+print(plot2)
+
+# Scale data for PCA
+all.features <- rownames(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj, features = all.features)
+
+# PCA analysis
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj))
+
+# Visualize PCA results
+print(seurat_obj[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(seurat_obj, dims = 1:2, reduction = "pca") +
+  labs(title = "PCA Loadings - Editing Data")
+DimPlot(seurat_obj, reduction = "pca") +
+  labs(title = "PCA - Editing Data")
+
+# Determine dimensionality
+ElbowPlot(seurat_obj, ndims = 50) +
+  labs(title = "Elbow Plot - Editing Data")
+
+# Variance explained by each PC
+summary(seurat_obj[["pca"]])
+# Cumulative variance explained
+plot(cumsum(seurat_obj[["pca"]]@stdev^2) / sum(seurat_obj[["pca"]]@stdev^2),
+     main = "Cumulative Variance Explained - Editing Data",
+     xlab = "Principal Component", ylab = "Cumulative Variance Explained")
+
+# Determine optimal number of PCs
+n_pcs <- min(20, ncol(seurat_obj[["pca"]]@cell.embeddings))
+
+# UMAP reduction - parameters may need adjustment for editing data
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:n_pcs,
+                      n.neighbors = 15,    
+                      min.dist = 0.1,      
+                      spread = 0.5)  
+
+# Find neighbors and clusters
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:n_pcs)
+# Set resolution - might need adjustment for editing data patterns
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.3)
+
+# Visualizations
+# UMAP plot with clusters
+p1 <- DimPlot(seurat_obj, reduction = "umap", label = TRUE, pt.size = 0.8) +
+  ggtitle("UMAP of RNA Editing Data")
+print(p1)
+
+# UMAP plot without labels for cleaner visualization
+p2 <- DimPlot(seurat_obj, reduction = "umap", label = FALSE, pt.size = 0.8) +
+  ggtitle("UMAP of RNA Editing Data")
+
+# Save the editing analysis plot
+ggsave("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH618_iCell8/JACUSA/umap_editing_clusters.png", 
+       plot = p2, width = 5, height = 4.5, dpi = 600)
+print(p2)
+
+# Summary statistics
+cat("Final number of cells after filtering:", ncol(seurat_obj), "\n")
+cat("Final number of editing sites after filtering:", nrow(seurat_obj), "\n")
+cat("Number of clusters:", length(levels(Idents(seurat_obj))), "\n")
+cat("Cluster sizes:\n")
+print(table(Idents(seurat_obj)))
+
+# Optional: Visualize some top variable editing sites
+if(length(VariableFeatures(seurat_obj)) > 0) {
+  top_edit_sites <- head(VariableFeatures(seurat_obj), 4)
+  FeaturePlot(seurat_obj, features = top_edit_sites, ncol = 2) +
+    labs(title = "Top Variable Editing Sites")
+}
+```
