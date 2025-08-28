@@ -1,0 +1,523 @@
+---
+title: "Seurat_Cell_Cycle_Analysis"
+output: html_document
+date: "2025-07-16"
+---
+
+```{r}
+# Load required libraries
+#BiocManager::install("ComplexHeatmap")
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(cowplot)
+library(pheatmap)
+library(viridis)
+library(ggpubr)
+library(RColorBrewer)
+library(scales)
+library(grid)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+# Set working directory and output path
+setwd("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH611_iCell8/")
+output_dir <- "/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH611_iCell8/CellCycle/"
+tpm_file <- "/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH611_iCell8/featureCounts/high_quality_tpm_matrix_annotated.tsv"
+```
+
+```{r}
+phase_order <- c("G1", "S", "G2M")
+
+# Publication theme
+publication_theme <- function() {
+   theme_minimal() +
+    theme(
+      # Text elements
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 15)),
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10, color = "black"),
+      legend.title = element_text(size = 11, face = "bold"),
+      legend.text = element_text(size = 10),
+      strip.text = element_text(size = 11, face = "bold"),
+      
+      # Layout elements
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid = element_blank(),
+      panel.background = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      axis.line = element_line(color = "black", size = 0.8),
+      axis.ticks = element_line(color = "black", size = 0.6),
+      
+      # Legend positioning
+      legend.position = "right",
+      legend.box.background = element_rect(color = "black", size = 0.5),
+      legend.margin = margin(l = 10),
+      
+      # Strip for facets
+      strip.background = element_rect(fill = "grey95", color = "black", size = 0.8),
+      
+      # Plot margins
+      plot.margin = margin(t = 10, r = 15, b = 10, l = 10)
+    )
+}
+
+# Enhanced color palette
+phase_colors_pub <- c(
+  "G1" = "#2E86AB",     # Professional blue
+  "S" = "#A23B72",      # Professional magenta
+  "G2M" = "#F18F01"     # Professional orange
+)
+
+# Function to convert phase to ordered factor
+order_phases <- function(phase_vector) {
+  factor(phase_vector, levels = phase_order)
+}
+
+# Function to load and preprocess TPM data (unchanged)
+load_tpm_data <- function(tpm_file) {
+  cat("Loading TPM data...\n")
+  
+  first_line <- readLines(tpm_file, n = 1)
+  separator <- ifelse(grepl("\t", first_line), "\t", ",")
+  
+  tpm_data <- read.table(tpm_file, header = TRUE, sep = separator, 
+                        stringsAsFactors = FALSE, row.names = 1)
+  
+  sample_cols <- grep("^sample_", colnames(tpm_data))
+  
+  cat(sprintf("Found %d sample columns\n", length(sample_cols)))
+  cat(sprintf("First few samples: %s\n", paste(colnames(tpm_data)[sample_cols[1:3]], collapse = ", ")))
+  
+  tpm_matrix <- tpm_data[, sample_cols]
+  gene_metadata <- tpm_data[, !colnames(tpm_data) %in% colnames(tpm_matrix)]
+  
+  if("gene_name" %in% colnames(gene_metadata)) {
+    gene_names <- ifelse(is.na(gene_metadata$gene_name) | gene_metadata$gene_name == "", 
+                        rownames(tpm_data), gene_metadata$gene_name)
+    rownames(tpm_matrix) <- make.unique(gene_names)
+  }
+  
+  cat(sprintf("Data dimensions: %d genes, %d cells\n", nrow(tpm_matrix), ncol(tpm_matrix)))
+  
+  return(list(matrix = tpm_matrix, metadata = gene_metadata))
+}
+
+# Function to create Seurat object and perform cell cycle analysis (unchanged)
+perform_seurat_cell_cycle <- function(tpm_matrix, gene_metadata) {
+  cat("Creating Seurat object...\n")
+  
+  seurat_obj <- CreateSeuratObject(counts = tpm_matrix, 
+                                  project = "CellCycle", 
+                                  min.cells = 3, 
+                                  min.features = 9000)
+  
+  seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", 
+                             scale.factor = 1000000, verbose = FALSE)
+  
+  seurat_obj@meta.data$orig.ident <- "CellCycle"
+  
+  cat("Performing cell cycle scoring...\n")
+  
+  s.genes <- cc.genes$s.genes
+  g2m.genes <- cc.genes$g2m.genes
+  
+  s.genes.available <- s.genes[s.genes %in% rownames(seurat_obj)]
+  g2m.genes.available <- g2m.genes[g2m.genes %in% rownames(seurat_obj)]
+  
+  cat(sprintf("S genes available: %d/%d (%.1f%%)\n", 
+              length(s.genes.available), length(s.genes), 
+              length(s.genes.available)/length(s.genes)*100))
+  cat(sprintf("G2M genes available: %d/%d (%.1f%%)\n", 
+              length(g2m.genes.available), length(g2m.genes), 
+              length(g2m.genes.available)/length(g2m.genes)*100))
+  
+  seurat_obj <- CellCycleScoring(seurat_obj, 
+                                s.features = s.genes.available, 
+                                g2m.features = g2m.genes.available, 
+                                set.ident = TRUE)
+  
+  cat("Performing alternative manual scoring...\n")
+  
+  if(length(s.genes.available) > 0) {
+    s_expr <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")[s.genes.available, , drop = FALSE]
+    seurat_obj$S_score_manual <- colMeans(s_expr)
+  }
+  
+  if(length(g2m.genes.available) > 0) {
+    g2m_expr <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")[g2m.genes.available, , drop = FALSE]
+    seurat_obj$G2M_score_manual <- colMeans(g2m_expr)
+  }
+  
+  if(length(s.genes.available) > 0 & length(g2m.genes.available) > 0) {
+    s_threshold <- quantile(seurat_obj$S_score_manual, 0.33)
+    g2m_threshold <- quantile(seurat_obj$G2M_score_manual, 0.33)
+    
+    seurat_obj$Phase_manual <- ifelse(seurat_obj$S_score_manual > s_threshold & 
+                                     seurat_obj$G2M_score_manual <= g2m_threshold, "S",
+                                     ifelse(seurat_obj$G2M_score_manual > g2m_threshold, "G2M", "G1"))
+  }
+  
+  return(seurat_obj)
+}
+
+# Enhanced function to create publication-ready plots
+create_publication_plots <- function(seurat_obj) {
+  cat("Creating publication-ready plots...\n")
+  
+  meta_data <- seurat_obj@meta.data
+  
+  # Figure 1A: Phase distribution with statistics
+  phase_counts <- table(meta_data$Phase)
+  phase_props <- prop.table(phase_counts) * 100
+  
+  # Create data frame for plotting
+  phase_df <- data.frame(
+    Phase = names(phase_counts),
+    Count = as.numeric(phase_counts[phase_order]),
+    Percentage = as.numeric(phase_props[phase_order])
+  )
+  
+  # Add statistical annotations
+  total_cells <- sum(phase_counts)
+  phase_df$Label <- paste0(phase_df$Phase, "\n", phase_df$Count, " cells\n(", 
+                          round(phase_df$Percentage, 1), "%)")
+  
+  p1 <- ggplot(phase_df, aes(x = Phase, y = Count, fill = Phase)) +
+    geom_bar(stat = "identity", alpha = 0.8, color = "black", size = 0.5) +
+    geom_text(aes(label = paste0(Count, "\n(", round(Percentage, 1), "%)")), 
+              vjust = -0.5, size = 3.5, fontface = "bold") +
+    scale_fill_manual(values = phase_colors_pub, limits = phase_order) +
+    scale_x_discrete(limits = phase_order) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(
+      title = "Cell Cycle Phase Distribution",
+      subtitle = paste0("HEK293T cells (n = ", total_cells, ")"),
+      x = "Cell Cycle Phase",
+      y = "Number of Cells"
+    ) +
+    publication_theme() +
+    theme(legend.position = "none")
+  
+  # Figure 1B: Score scatter plot with density contours
+  p2 <- ggplot(meta_data, aes(x = S.Score, y = G2M.Score, color = Phase)) +
+    geom_point(alpha = 0.6, size = 1.2) +
+    stat_density_2d(alpha = 0.3, size = 0.5) +
+    scale_color_manual(values = phase_colors_pub, name = "Cell Cycle\nPhase") +
+    labs(
+      title = "Cell Cycle Score Distribution",
+      x = "S Phase Score",
+      y = "G2M Phase Score"
+    ) +
+    publication_theme() +
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 3)))
+  
+  # Figure 1C: Score distributions as violin plots
+  score_data <- data.frame(
+    Score = c(meta_data$S.Score, meta_data$G2M.Score),
+    Type = rep(c("S Score", "G2M Score"), each = nrow(meta_data)),
+    Phase = rep(meta_data$Phase, 2)
+  )
+  
+  p3 <- ggplot(score_data, aes(x = Type, y = Score, fill = Type)) +
+    geom_violin(alpha = 0.7, trim = FALSE) +
+    geom_boxplot(width = 0.1, fill = "white", alpha = 0.8, outlier.shape = NA) +
+    scale_fill_manual(values = c("S Score" = "#A23B72", "G2M Score" = "#F18F01")) +
+    labs(
+      title = "Cell Cycle Score Distributions",
+      x = "Score Type",
+      y = "Score Value"
+    ) +
+    publication_theme() +
+    theme(legend.position = "none")
+  
+  # Figure 1D: Key marker genes by phase
+  key_markers <- c("MKI67", "PCNA", "CDK1", "CCNB1", "RB1", "CDKN1A")
+  available_markers <- key_markers[key_markers %in% rownames(seurat_obj)]
+  
+  if(length(available_markers) > 0) {
+    marker_data <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")[available_markers, , drop = FALSE]
+    marker_df <- data.frame(
+      Expression = as.vector(t(marker_data)),
+      Gene = rep(available_markers, each = ncol(marker_data)),
+      Phase = rep(meta_data$Phase, length(available_markers))
+    )
+    
+    # Add statistical comparisons
+    p4 <- ggplot(marker_df, aes(x = Phase, y = Expression, fill = Phase)) +
+      geom_violin(alpha = 0.7, trim = FALSE) +
+      geom_boxplot(width = 0.2, fill = "white", alpha = 0.8, outlier.size = 0.5) +
+      facet_wrap(~Gene, scales = "free_y", ncol = 3) +
+      scale_fill_manual(values = phase_colors_pub, limits = phase_order) +
+      scale_x_discrete(limits = phase_order) +
+      stat_compare_means(method = "anova", label.y.npc = 0.9, size = 3) +
+      labs(
+        title = "Cell Cycle Marker Expression",
+        x = "Cell Cycle Phase",
+        y = "Log-normalized Expression"
+      ) +
+      publication_theme() +
+      theme(
+        legend.position = "none",
+        strip.text = element_text(size = 10, face = "bold.italic")
+      )
+  } else {
+    p4 <- ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, label = "No key markers found", size = 6) +
+      theme_void()
+  }
+  
+
+# Function to create main publication figure
+create_main_figure <- function(plots) {
+  cat("Assembling main publication figure...\n")
+  
+  # Create figure with proper labeling
+  fig_top <- plot_grid(
+    plots$phase_distribution,
+    plots$score_scatter,
+    plots$score_distributions,
+    labels = c("A", "B", "C"),
+    label_size = 16,
+    label_fontface = "bold",
+    ncol = 3,
+    rel_widths = c(1, 1.2, 1)
+  )
+  
+  fig_bottom <- plot_grid(
+    plots$marker_expression,
+    labels = c("D"),
+    label_size = 16,
+    label_fontface = "bold",
+    ncol = 1
+  )
+  
+  main_figure <- plot_grid(
+    fig_top,
+    fig_bottom,
+    ncol = 1,
+    rel_heights = c(1, 1.2)
+  )
+  
+  return(main_figure)
+}
+
+# Function to perform statistical validation (unchanged)
+perform_statistical_validation <- function(seurat_obj) {
+  cat("Performing statistical validation...\n")
+  
+  meta_data <- seurat_obj@meta.data
+  
+  phase_counts <- table(meta_data$Phase)
+  phase_props <- prop.table(phase_counts)
+  
+  cat("Phase distribution:\n")
+  print(phase_counts)
+  cat("\nPhase proportions:\n")
+  print(round(phase_props, 3))
+  
+  chi_test <- chisq.test(phase_counts, p = rep(1/3, 3))
+  
+  cat(sprintf("\nChi-square test for equal distribution: X² = %.3f, p = %.3e\n", 
+              chi_test$statistic, chi_test$p.value))
+  
+  s_anova <- aov(S.Score ~ Phase, data = meta_data)
+  g2m_anova <- aov(G2M.Score ~ Phase, data = meta_data)
+  
+  cat(sprintf("S Score ANOVA p-value: %.3e\n", summary(s_anova)[[1]][["Pr(>F)"]][1]))
+  cat(sprintf("G2M Score ANOVA p-value: %.3e\n", summary(g2m_anova)[[1]][["Pr(>F)"]][1]))
+  
+  score_cor <- cor(meta_data$S.Score, meta_data$G2M.Score)
+  cat(sprintf("S-G2M Score correlation: %.3f\n", score_cor))
+  
+  pairwise_s <- pairwise.t.test(meta_data$S.Score, meta_data$Phase, 
+                               p.adjust.method = "bonferroni")
+  pairwise_g2m <- pairwise.t.test(meta_data$G2M.Score, meta_data$Phase, 
+                                 p.adjust.method = "bonferroni")
+  
+  cat("\nPairwise t-tests for S scores:\n")
+  print(pairwise_s$p.value)
+  cat("\nPairwise t-tests for G2M scores:\n")
+  print(pairwise_g2m$p.value)
+  
+  cat("\n=== EXPECTED PATTERN VALIDATION ===\n")
+  
+  phase_means <- aggregate(cbind(S.Score, G2M.Score) ~ Phase, data = meta_data, mean)
+  print(phase_means)
+  
+  s_highest_in_s <- phase_means[phase_means$Phase == "S", "S.Score"] > 
+                   max(phase_means[phase_means$Phase != "S", "S.Score"])
+  g2m_highest_in_g2m <- phase_means[phase_means$Phase == "G2M", "G2M.Score"] > 
+                       max(phase_means[phase_means$Phase != "G2M", "G2M.Score"])
+  
+  cat(sprintf("S scores highest in S phase: %s\n", ifelse(s_highest_in_s, "✓", "✗")))
+  cat(sprintf("G2M scores highest in G2M phase: %s\n", ifelse(g2m_highest_in_g2m, "✓", "✗")))
+  
+  validation_results <- list(
+    phase_counts = phase_counts,
+    phase_props = phase_props,
+    chi_test = chi_test,
+    score_correlation = score_cor,
+    s_pattern_correct = s_highest_in_s,
+    g2m_pattern_correct = g2m_highest_in_g2m,
+    phase_means = phase_means
+  )
+  
+  return(validation_results)
+}
+
+# Function to save publication-ready outputs
+save_publication_outputs <- function(seurat_obj, validation_results, plots, main_figure, output_dir = "publication_output") {
+  cat("Saving publication-ready outputs...\n")
+  
+  # Create output directory
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Save main figure (high resolution)
+  ggsave(
+    filename = paste0(output_dir, "/Figure1_CellCycle_Analysis.png"), 
+    plot = main_figure, 
+    width = 15, height = 12, dpi = 300, units = "in"
+  )
+  
+  ggsave(
+    filename = paste0(output_dir, "/Figure1_CellCycle_Analysis.pdf"), 
+    plot = main_figure, 
+    width = 15, height = 12, units = "in"
+  )
+  
+  # Save individual high-resolution panels
+  ggsave(paste0(output_dir, "/Figure1A_PhaseDistribution.png"), 
+         plots$phase_distribution, width = 5, height = 4, dpi = 300)
+  
+  ggsave(paste0(output_dir, "/Figure1B_ScoreScatter.png"), 
+         plots$score_scatter, width = 6, height = 4, dpi = 300)
+  
+  ggsave(paste0(output_dir, "/Figure1C_ScoreDistributions.png"), 
+         plots$score_distributions, width = 5, height = 4, dpi = 300)
+  
+  ggsave(paste0(output_dir, "/Figure1D_MarkerExpression.png"), 
+         plots$marker_expression, width = 10, height = 8, dpi = 300)
+  
+  # Save method comparison as separate figure
+  if(!is.null(plots$method_comparison)) {
+    png(paste0(output_dir, "/Figure2_MethodComparison.png"), 
+        width = 6, height = 5, units = "in", res = 300)
+    draw(plots$method_comparison)
+    dev.off()
+  }
+  
+  # Save results table
+  results_df <- data.frame(
+    Cell_ID = colnames(seurat_obj),
+    Phase = seurat_obj@meta.data$Phase,
+    S_Score = seurat_obj@meta.data$S.Score,
+    G2M_Score = seurat_obj@meta.data$G2M.Score,
+    stringsAsFactors = FALSE
+  )
+  
+  write.csv(results_df, paste0(output_dir, "/TableS1_CellCycle_Results.csv"), row.names = FALSE)
+  
+  # Save statistical summary
+  validation_summary <- data.frame(
+    Metric = c("Total_Cells", "G1_Count", "S_Count", "G2M_Count",
+               "G1_Proportion", "S_Proportion", "G2M_Proportion",
+               "Chi_Square_Statistic", "Chi_Square_P_Value",
+               "S_G2M_Correlation", "S_Pattern_Correct", "G2M_Pattern_Correct"),
+    Value = c(nrow(seurat_obj@meta.data),
+              validation_results$phase_counts[["G1"]],
+              validation_results$phase_counts[["S"]],
+              validation_results$phase_counts[["G2M"]],
+              round(validation_results$phase_props[["G1"]], 4),
+              round(validation_results$phase_props[["S"]], 4),
+              round(validation_results$phase_props[["G2M"]], 4),
+              round(validation_results$chi_test$statistic, 3),
+              validation_results$chi_test$p.value,
+              round(validation_results$score_correlation, 3),
+              validation_results$s_pattern_correct,
+              validation_results$g2m_pattern_correct),
+    stringsAsFactors = FALSE
+  )
+  
+  write.csv(validation_summary, paste0(output_dir, "/TableS2_Statistical_Summary.csv"), row.names = FALSE)
+  
+  # Create figure legend file
+  legend_text <- paste0(
+    "Figure 1. Cell cycle analysis of HEK293T cells using single-cell RNA sequencing.\n",
+    "(A) Distribution of cells across cell cycle phases. Numbers indicate cell counts and percentages. ",
+    "Total n = ", nrow(seurat_obj@meta.data), " cells.\n",
+    "(B) Scatter plot showing S phase and G2M phase scores for individual cells, colored by assigned phase. ",
+    "Density contours indicate cell density.\n",
+    "(C) Violin plots showing distribution of S and G2M phase scores across the population.\n",
+    "(D) Expression of key cell cycle marker genes across different phases. ",
+    "Boxes show median and quartiles, violins show distribution shape. ",
+    "ANOVA p-values shown above each panel.\n\n",
+    "Cell cycle phases were determined using Seurat's CellCycleScoring function with canonical S and G2M marker genes. ",
+    "G1 phase: ", validation_results$phase_counts[["G1"]], " cells (", round(validation_results$phase_props[["G1"]]*100, 1), "%), ",
+    "S phase: ", validation_results$phase_counts[["S"]], " cells (", round(validation_results$phase_props[["S"]]*100, 1), "%), ",
+    "G2M phase: ", validation_results$phase_counts[["G2M"]], " cells (", round(validation_results$phase_props[["G2M"]]*100, 1), "%)."
+  )
+  
+  writeLines(legend_text, paste0(output_dir, "/Figure1_Legend.txt"))
+  
+  cat("Publication outputs saved to:", output_dir, "\n")
+  cat("Files generated:\n")
+  cat("- Figure1_CellCycle_Analysis.png/pdf (main figure)\n")
+  cat("- Figure1A-D_*.png (individual panels)\n")
+  cat("- Figure2_MethodComparison.png (if available)\n")
+  cat("- TableS1_CellCycle_Results.csv (data table)\n")
+  cat("- TableS2_Statistical_Summary.csv (statistics)\n")
+  cat("- Figure1_Legend.txt (figure legend)\n")
+}
+
+```
+
+```{r}
+seurat_obj <- readRDS(file = paste0(output_dir,"high_quality_tpm_matrix_annotated.rds"))
+```
+
+
+
+```{r}
+# Statistical validation
+  validation_results <- perform_statistical_validation(seurat_obj)
+  
+  # Create publication plots
+  plots <- create_publication_plots(seurat_obj)
+  
+  # Assemble main figure
+  main_figure <- create_main_figure(plots)
+  
+  # Save all outputs
+  save_publication_outputs(seurat_obj, validation_results, plots, main_figure, output_dir)
+  
+  # Final assessment
+  cat("\n=== FINAL ASSESSMENT ===\n")
+  
+  g1_prop <- validation_results$phase_props[["G1"]]
+  issues <- c()
+  
+  if(g1_prop < 0.1) {
+    cat("NOTE: Low G1 proportion (", round(g1_prop, 3), ") - typical for exponentially growing HEK293T\n")
+  }
+  
+  if(validation_results$phase_props[["S"]] + validation_results$phase_props[["G2M"]] > 0.8) {
+    cat("NOTE: High proliferation rate (", round((validation_results$phase_props[["S"]] + validation_results$phase_props[["G2M"]])*100, 1), "%) - expected for healthy HEK293T culture\n")
+  }
+  
+  if(validation_results$s_pattern_correct && validation_results$g2m_pattern_correct) {
+    cat("✓ VALIDATION PASSED: Cell cycle patterns are biologically consistent\n")
+  } else {
+    cat("⚠️ WARNING: Unexpected cell cycle patterns detected\n")
+  }
+  
+  cat("\nPublication-ready figures and data saved to:", output_dir, "\n")
+
+```

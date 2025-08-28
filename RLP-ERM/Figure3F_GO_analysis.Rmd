@@ -1,0 +1,98 @@
+---
+title: "GO_enrichment_analysis"
+output: html_document
+date: "2024-08-29"
+---
+
+# Load necessary libraries
+```{r}
+#BiocManager::install("org.Hs.eg.db")
+#BiocManager::install("AnnotationHub")
+#BiocManager::install("AnnotationDbi")
+#BiocManager::install("dplyr")
+#BiocManager::install("stringr")
+#BiocManager::install("clusterProfiler")
+library("clusterProfiler")
+library("enrichplot")
+library("org.Hs.eg.db")
+library("ggplot2")
+library("AnnotationHub")
+library("AnnotationDbi")
+library("dplyr")
+library("stringr")
+```
+
+# Load data
+```{r}
+data<-scan(what = character(), sep = "\n")
+```
+
+# Go analysis
+```{r}
+# Convert the vector to a data frame
+data_df <- data.frame(Gene = data, stringsAsFactors = FALSE)
+colnames(data_df)
+
+# Print the data frame
+head(data_df)
+
+# Conversion from gene symbols to Entrez IDs
+mapped_genes <- bitr(data_df$Gene, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+
+# Use left_join to merge ENTREZID back to data_df
+data_df <- data_df %>%
+  left_join(mapped_genes, by = c("Gene" = "SYMBOL"))
+
+# Check conversion
+head(data_df$ENTREZID)
+
+# GO analysis
+ontology <- "CC"
+
+all.genes <- keys(org.Hs.eg.db, keytype = "SYMBOL")
+head(all.genes)
+all.genes.df = bitr(all.genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+all.genes.df <- all.genes.df[!duplicated(all.genes.df$SYMBOL), ]
+head(all.genes.df$ENTREZID, 10)
+
+EGO = enrichGO(gene = data_df$ENTREZID, universe = all.genes.df$ENTREZID, 
+         OrgDb = "org.Hs.eg.db", ont = ontology, pvalueCutoff = 0.05, 
+         pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+SimGO = clusterProfiler::simplify(EGO, cutoff = 0.7, by = "p.adjust", select_fun = min, measure = "Wang", semData = NULL)
+nrow(SimGO)
+
+p <- barplot(SimGO, showCategory = 20) + 
+    xlab("Count") + 
+    ylab("Enriched terms") +
+    theme(
+        axis.text.y = element_text(lineheight = 0.6, size = 8),  # Adjust line height for y-axis labels
+        plot.margin = margin(t = 5, r = 80, b = 5, l = 90),   # Reduce right margin to bring legend closer
+        legend.key.size = unit(1, "cm"),  # Reduce size of legend keys
+        legend.text = element_text(size = 7),  # Adjust size of legend text
+        legend.spacing.x = unit(0.2, "cm"),  # Narrow spacing between legend keys
+        legend.position = "right",           # Position legend outside the plot on the right
+        legend.box.margin = margin(0, 0, 0, -10), # Negative margin to pull legend closer to plot
+        legend.margin = margin(0, 0, 0, 0),  # Remove internal legend margins
+        #legend.key.height = unit(0.5, "cm"),  # Height of color key
+        #legend.key.width = unit(1.0, "cm")   # Width of color key - make it narrower
+    ) +
+    scale_y_discrete(labels = function(x) str_wrap(x, width = 50)) +  # Wrap y-axis labels
+    scale_fill_gradient(high = "#ECF9C0", low = "#BAE628", name = "p.adjust") +
+    guides(fill = guide_colorbar(
+        barwidth = 0.6,      # Make color bar narrower
+        barheight = 2,       # Make color bar taller
+        ticks.linewidth = 0.5,
+        frame.colour = "white",
+        frame.linewidth = 0.5,
+        title.position = "top",
+        title.hjust = 0.5,
+        direction = "vertical",
+        reverse = TRUE
+    ))
+print(p)
+
+ggsave("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/Figures/RLP-GJA1_Cluster6-7_GO_analysis_CC.png", plot = p, width = 6.5, height = 1.5, dpi = 600)
+
+gene_group.tab = SimGO@result
+write.table(gene_group.tab, file = paste0("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/Figures/RLP-GJA1_Cluster6-7_GO_analysis_CC.csv"), sep = ",", quote = F, row.names = F, col.names = T)
+```

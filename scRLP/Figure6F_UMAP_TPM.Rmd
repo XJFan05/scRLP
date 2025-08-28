@@ -1,0 +1,115 @@
+---
+title: "UMAP_analysis_tpm"
+output: html_document
+date: "2025-07-04"
+---
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# Read expression matrices
+expr_data <- read.table("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH618_iCell8/featureCounts/high_quality_readCount_matrix_counts_annotated.tsv", header = TRUE, sep = "\t", row.names = 1)
+
+# For expression matrix, find sample columns
+expr_sample_start_col <- which(colnames(expr_data) == "total_cells") + 1
+expr_samples <- colnames(expr_data)[expr_sample_start_col:ncol(expr_data)]
+
+# Find common samples between both matrices
+cat("Total samples in expression matrix:", length(expr_samples), "\n")
+
+# Extract the expression matrix (samples only)
+expr_matrix <- expr_data[, expr_sample_start_col:ncol(expr_data)]
+
+# Convert to matrix format and ensure it's numeric
+expr_matrix <- as.matrix(expr_matrix)
+expr_matrix[is.na(expr_matrix)] <- 0  # Replace NAs with 0
+
+cat("Total samples in expression matrix:", ncol(expr_matrix), "\n")
+cat("Total expressed genes:", nrow(expr_matrix), "\n")
+
+```
+
+```{r}
+seurat_obj<-readRDS("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH618_iCell8/featureCounts/expression_data_seurat_object.rds")
+# Create Seurat object with filtering
+seurat_obj <- CreateSeuratObject(counts = expr_matrix, 
+                                project = "RNA_expression_analysis", 
+                                min.cells = 3,      # Gene must be detected in at least 3 cells
+                                min.features = 0) 
+
+# Normalize the data
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 1e6)
+
+# Visualize QC metrics (only nFeature_RNA and nCount_RNA)
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+
+# Find variable features
+seurat_obj <- FindVariableFeatures(seurat_obj, 
+                                  selection.method = "vst", 
+                                  nfeatures = 2000)
+
+# Visualize variable features
+top10 <- head(VariableFeatures(seurat_obj), 10)
+plot1 <- VariableFeaturePlot(seurat_obj)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+print(plot2)
+
+# Scale data for PCA
+all.features <- rownames(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj, features = all.features)
+
+# PCA analysis
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj))
+
+# Visualize PCA results
+print(seurat_obj[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(seurat_obj, dims = 1:2, reduction = "pca")
+DimPlot(seurat_obj, reduction = "pca")
+
+# Determine dimensionality
+ElbowPlot(seurat_obj, ndims = 50)
+# Variance explained by each PC
+summary(seurat_obj[["pca"]])
+# Cumulative variance explained
+plot(cumsum(seurat_obj[["pca"]]@stdev^2) / sum(seurat_obj[["pca"]]@stdev^2))
+
+# Determine optimal number of PCs
+n_pcs <- min(20, ncol(seurat_obj[["pca"]]@cell.embeddings))
+
+# UMAP reduction using fewer dimensions since expression data is typically lower dimensional
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:n_pcs,
+                      n.neighbors = 15,    
+                      min.dist = 0.1,      
+                      spread = 0.5)  
+
+# Find neighbors and clusters
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:n_pcs)
+# Set to the optimal resolution (might need adjustment for expression data)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.3)
+
+# Visualizations
+# UMAP plot with clusters
+p1 <- DimPlot(seurat_obj, reduction = "umap", label = TRUE, pt.size = 0.8) +
+  ggtitle("UMAP of RNA expression Data")
+print(p1)
+
+# UMAP plot without labels for cleaner visualization
+p2 <- DimPlot(seurat_obj, reduction = "umap", label = FALSE, pt.size = 0.8) +
+  ggtitle("UMAP of RNA expression Data")
+
+ggsave("/Users/fanx3/Desktop/RNA_localizatioin/single-cell/RNA-seq/MH618_iCell8/featureCounts/umap_expression_clusters.png", 
+       plot = p2, width = 5, height = 4.5, dpi = 600)
+print(p2)
+
+# Summary statistics
+cat("Final number of cells after filtering:", ncol(seurat_obj), "\n")
+cat("Final number of expressed genes after filtering:", nrow(seurat_obj), "\n")
+cat("Number of clusters:", length(levels(Idents(seurat_obj))), "\n")
+cat("Cluster sizes:\n")
+print(table(Idents(seurat_obj)))
+
+```
